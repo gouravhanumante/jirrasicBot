@@ -6,6 +6,9 @@ const Groq = require('groq-sdk');
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const fetchRequiredFields = require('./fetchMandatoryFields');
+const fetchSpecificCustomFields = require('./fetchspecificDetails.js')
+
+// const fetchSpecificCustomFields = require('./fetchspecificDetails.js')
 
 const app = new App({
     token: process.env.SLACK_BOT_TOKEN,
@@ -14,8 +17,6 @@ const app = new App({
     appToken: process.env.SLACK_APP_TOKEN,
     logLevel: 'debug'
 });
-
-
 
 app.event('app_mention', async ({ event, client, say }) => {
     try {
@@ -125,13 +126,23 @@ app.view('simple_input_modal', async ({ ack, body, view, client }) => {
         const ticketPrompt = view.state.values.ticket_prompt_block.ticket_prompt.value;
         
         const userInput =  await extractTicketDetailsWithGroq(ticketPrompt)
-
-        console.log("PROJECT:", userInput.project, " ISSUE_TYPE","Task")
-        console.log("TICKET PROMPT JJSON DETAIL", userInput)
         
+        console.log("userInputttt", userInput)
         const missingFields = await checkMissingFields(userInput);
 
-console.log("missingFieldssss", missingFields)
+        console.log("missingFieldssss", missingFields)
+        if(missingFields.length > 0){
+            for(let i = 0; i < missingFields.length; i++){
+                const field = missingFields[i];
+                console.log("field", field)
+                const fieldDetails = await fetchSpecificCustomFields(field);
+                console.log("fieldDetails", fieldDetails)
+            }
+        }
+        
+        
+
+        console.log("missingFieldssss", missingFields)
 
 
         if (missingFields.length > 0) {
@@ -216,17 +227,35 @@ console.log("missingFieldssss", missingFields)
     }
 });
 
-///////////////////////////////////////////////
+
 
 
 async function extractTicketDetailsWithGroq(message) {
+
     const prompt = `
-    Extract ticket details from this message. Return valid JSON without extra text i just need json data without extra hi hello ad dont even ask Let me know if you need any further assistance!:
-    summary, description, priority (Highest/High/Medium/Low/Lowest) , issue_type (Task/Bug/Story), and mainly project (PSV,CAP etc), assignee (automatic), and labels (array).and dont add anything else in you response just json should be there and non firld should be missing
+    Extract ticket details from the following message. Return a valid JSON object **only** with the fields that are explicitly mentioned or intelligently inferred from the message. Do not include any fields that are not explicitly mentioned or inferred.
+
+    The following fields should be extracted (if present or inferred):
+    - **summary**: The main task or issue. This could be inferred from actions like "change button color," "update text," etc.
+    - **description**: Any additional context or details related to the task (if explicitly mentioned).
+    - **priority**: If mentioned, return priority as "Highest", "High", "Medium", "Low", or "Lowest".
+    - **issuetype**: If explicitly mentioned, return the type of issue (e.g., bug, feature request).
+    - **project**: If mentioned, return the project name or inferred based on keywords.
+    - **assignee**: If the task is assigned to someone (e.g., "assign to Sarthak"), return the assignee's name.
+    - **labels**: If mentioned, return labels as an array (e.g., ["shell_th"]).
+    
+    In addition to these, **other fields** might be present in the message, such as:
+    - **due_date**: Inferred if mentioned in phrases like "by tomorrow," "ASAP," "end of the week," etc.
+    - **severity**: Can be inferred from words like "critical," "urgent," etc.
+    - **tags**: If tags or keywords are mentioned (e.g., "tag: important"), include them as an array.
+    - **due_time**: If specific time is mentioned (e.g., "by 5 PM," "in 2 hours").
+
+    If any of these fields are not mentioned or are unclear from the message, **do not include them** in the output. Focus on **smartly inferring** fields that are clearly implied by the context of the message, but skip irrelevant or undefined fields.
 
     Message:
-${message}
+    ${message}
     `;
+
 
     const res = await groq.chat.completions.create({
         model: 'llama3-8b-8192',
@@ -235,6 +264,7 @@ ${message}
     });
 
     const rawResponse = res.choices[0].message.content.trim();
+    console.log("rawResponseeee", rawResponse)
 
     try {
         const jsonMatch = rawResponse.match(/{.*}/s);
@@ -255,10 +285,7 @@ ${message}
     }
 }
 
-///////////////////////////////////////////////
 
-// Placeholder function to check for missing fields
-// Replace this with your actual parsing logic
 async function checkMissingFields(userInputJson) {
     const missingFields = [];
 
@@ -266,40 +293,29 @@ async function checkMissingFields(userInputJson) {
     if(!userInputJson.project){
         missingFields.push("project")
     }
-    if (!userInputJson.issue_type) {
-        missingFields.push("issue_type")
+    if (!userInputJson.issuetype) {
+        missingFields.push("issuetype")
     }
-    console.log("missingFieldschecksinside", missingFields)
 
+    console.log("missingFieldsmainnnnnnn", missingFields);
+    
     if (missingFields.length >0) {
         return missingFields
     }
 
-    console.log("hehehehhehehe")
-    const mandatoryFields = await fetchRequiredFields()
-
-    console.log("mandatoryFieldssss ",mandatoryFields );
-    
+    const requiredFields = await fetchRequiredFields(userInputJson.project, userInputJson.issuetype.capitalizeFirstLetter());
 
 
+    const details = await fetchSpecificCustomFields("");
 
-    // // Example: Check for required fields
-    // if (!prompt.toLowerCase().includes('priority')) {
-    //     missingFields.push('priority');
-    // }
-
-    // if (!prompt.toLowerCase().includes('type')) {
-    //     missingFields.push('type');
-    // }
-
-    // if (!prompt.toLowerCase().includes('assign') && !prompt.toLowerCase().includes('assignee')) {
-    //     missingFields.push('assignee');
-    // }
-
-    // if (!prompt.toLowerCase().includes('label')) {
-    //     missingFields.push('label');
-    // }
-
+    console.log("requiredFieldsssss ", requiredFields)
+  
+    requiredFields.forEach(field => {
+      if (!userInputJson[field]) {
+        missingFields.push(field);
+      }
+    });
+  
     return missingFields;
 }
 
@@ -307,3 +323,9 @@ async function checkMissingFields(userInputJson) {
     await app.start(process.env.PORT || 3000);
     console.log('⚡️ Slack Ticket Bot is running!');
 })();
+
+
+
+String.prototype.capitalizeFirstLetter = function() {
+    return this.charAt(0).toUpperCase() + this.slice(1);
+  };
