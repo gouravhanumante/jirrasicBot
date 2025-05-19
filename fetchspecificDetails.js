@@ -1,5 +1,9 @@
 require('dotenv').config();
 const axios = require('axios');
+const jirabaseurl = 'https://capillarytech.atlassian.net'; 
+const jiraemail = 'gourav.hanumante@capillarytech.com'; // Replace with your Jira email
+const apiToken = process.env.JIRA_API_KEY; // Replace with your Jira API token
+
 
 async function fetchSpecificCustomFields(fieldIds) {
     const url = `${jirabaseurl}/rest/api/2/field`;
@@ -18,7 +22,7 @@ async function fetchSpecificCustomFields(fieldIds) {
         },
       });
   
-      console.log('API response:', response.data);
+      // console.log('API response:', response.data);
   
       const fields = response.data;
       const customFields = fields.filter(field => fieldIds.includes(field.id));
@@ -31,12 +35,25 @@ async function fetchSpecificCustomFields(fieldIds) {
         console.log('--------------------------');
       });
   
-      return customFields;
+      // Create a map with field.id as the key
+      const customFieldsMap = {};
+      customFields.forEach(field => {
+        customFieldsMap[field.id] = field;
+      });
+  
+      return customFieldsMap;
     } catch (error) {
       console.error('Failed to fetch custom fields:', error.response?.data || error.message);
-      return [];
+      return {};
     }
   }
   
+let nameToIdMap = {};
+async function buildFieldNameMap() {
+  const allFields = await fetchSpecificCustomFields([]); // or fetch all fields directly
+  Object.values(allFields).forEach(field => {
+    nameToIdMap[field.name.toLowerCase()] = field.id;
+  });
+}
 
 module.exports = fetchSpecificCustomFields

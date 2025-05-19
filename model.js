@@ -7,6 +7,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const fetchRequiredFields = require('./fetchMandatoryFields');
 const fetchSpecificCustomFields = require('./fetchspecificDetails.js')
+const axios = require('axios')
 
 // const fetchSpecificCustomFields = require('./fetchspecificDetails.js')
 
@@ -59,6 +60,8 @@ app.event('app_mention', async ({ event, client, say }) => {
 app.action('open_simple_modal', async ({ body, ack, client }) => {
     await ack();
     try {
+        // Add this for debugging
+        console.log('ACTION BODY:', JSON.stringify(body, null, 2));
 
         const modalView = {
             type: "modal",
@@ -110,9 +113,28 @@ app.action('open_simple_modal', async ({ body, ack, client }) => {
             ]
         };
 
+        // Robust extraction for channel and thread_ts
+        const channel =
+            body.channel?.id ||
+            body.channel_id ||
+            body.message?.channel ||
+            (body.container && body.container.channel_id);
+
+        const thread_ts =
+            body.message?.thread_ts ||
+            body.message?.ts ||
+            body.message_ts ||
+            (body.container && body.container.thread_ts);
+
         await client.views.open({
             trigger_id: body.trigger_id,
-            view: modalView
+            view: {
+                ...modalView,
+                private_metadata: JSON.stringify({
+                    channel: channel,
+                    thread_ts: thread_ts
+                })
+            }
         });
     } catch (error) {
         console.error('Error opening modal:', error);
@@ -129,20 +151,6 @@ app.view('simple_input_modal', async ({ ack, body, view, client }) => {
         
         console.log("userInputttt", userInput)
         const missingFields = await checkMissingFields(userInput);
-
-        console.log("missingFieldssss", missingFields)
-        if(missingFields.length > 0){
-            for(let i = 0; i < missingFields.length; i++){
-                const field = missingFields[i];
-                console.log("field", field)
-                const fieldDetails = await fetchSpecificCustomFields(field);
-                console.log("fieldDetails", fieldDetails)
-            }
-        }
-        
-        
-
-        console.log("missingFieldssss", missingFields)
 
 
         if (missingFields.length > 0) {
@@ -211,14 +219,50 @@ app.view('simple_input_modal', async ({ ack, body, view, client }) => {
                 }
             });
         } else {
-            // // If all required fields are present, acknowledge and process
-            // await ack();
+            // If all required fields are present, acknowledge and process
+            await ack();
 
-            // // Process the ticket and send confirmation
-            // await client.chat.postMessage({
-            //     channel: userId,
-            //     text: `I received your complete ticket request:\n\n${ticketPrompt}\n\nI'll process this ticket right away!`
-            // });
+            // Process the ticket and send confirmation
+            const response =  await createJiraTicket(userInput);
+            console.log("respseinf", response);
+            const ticketNo = response?.data?.key;
+            const ticketUrl = `https://capillarytech.atlassian.net/browse/${ticketNo}`;
+            // Extract channel and thread_ts from private_metadata
+            const metadata = JSON.parse(view.private_metadata || '{}');
+            const channel = metadata.channel;
+            const thread_ts = metadata.thread_ts;
+
+            if (typeof channel === 'string' && channel.trim().length > 0) {
+                await client.chat.postMessage({
+                    channel: channel,
+                    text: `Hi <@${userId}>! Click the link to open the ticket: ${ticketUrl}`,
+                    blocks: [
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: `Hi <@${userId}>! Click the link to open the ticket: ${ticketUrl}`
+                            }
+                        }
+                    ],
+                    ...(thread_ts ? { thread_ts } : {})
+                });
+            } else {
+                console.error('No valid channel found in private_metadata, sending confirmation as DM to user. Channel value:', channel);
+                await client.chat.postMessage({
+                    channel: userId,
+                    text: `Hi <@${userId}>! Click the link to open the ticket: ${ticketUrl}`,
+                    blocks: [
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: `Hi <@${userId}>! Click the link to open the ticket: ${ticketUrl}`
+                            }
+                        }
+                    ]
+                });
+            }
         } 
 
     } catch (error) {
@@ -236,11 +280,11 @@ async function extractTicketDetailsWithGroq(message) {
     Extract ticket details from the following message. Return a valid JSON object **only** with the fields that are explicitly mentioned or intelligently inferred from the message. Do not include any fields that are not explicitly mentioned or inferred.
 
     The following fields should be extracted (if present or inferred):
-    - **summary**: The main task or issue. This could be inferred from actions like "change button color," "update text," etc.
-    - **description**: Any additional context or details related to the task (if explicitly mentioned).
+    - **summary**: The main task or issue. This could be inferred from actions like "change button color," "update text," etc rephrase the summary in technical language and.
+    - **description**: Any additional context or details related to the task. If not provided use summary and form a description of atleast 15 words in technical language and don't use other fields in description
     - **priority**: If mentioned, return priority as "Highest", "High", "Medium", "Low", or "Lowest".
     - **issuetype**: If explicitly mentioned, return the type of issue (e.g., bug, feature request).
-    - **project**: If mentioned, return the project name or inferred based on keywords.
+    - **project**: If mentioned, return the project name or inferred based on keywords it will have values like CAP, PSV, CJ.
     - **assignee**: If the task is assigned to someone (e.g., "assign to Sarthak"), return the assignee's name.
     - **labels**: If mentioned, return labels as an array (e.g., ["shell_th"]).
     
@@ -249,6 +293,9 @@ async function extractTicketDetailsWithGroq(message) {
     - **severity**: Can be inferred from words like "critical," "urgent," etc.
     - **tags**: If tags or keywords are mentioned (e.g., "tag: important"), include them as an array.
     - **due_time**: If specific time is mentioned (e.g., "by 5 PM," "in 2 hours").
+    - **customfield_11997**: this is the brand or organisation for which ticket is raised.
+    - **components**: If mentioned, return the components or inferred based on keywords it will have value like API, alerts, Backend-CRM infer it as a string.
+    - **customfield_11800**: If mentioned, return the environment or inferred based on keywords it is a enum with values like Prod, UAT, Nightly, Staging, Demo, Go-Live.
 
     If any of these fields are not mentioned or are unclear from the message, **do not include them** in the output. Focus on **smartly inferring** fields that are clearly implied by the context of the message, but skip irrelevant or undefined fields.
 
@@ -260,7 +307,7 @@ async function extractTicketDetailsWithGroq(message) {
     const res = await groq.chat.completions.create({
         model: 'llama3-8b-8192',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2
+        temperature: 0
     });
 
     const rawResponse = res.choices[0].message.content.trim();
@@ -286,6 +333,95 @@ async function extractTicketDetailsWithGroq(message) {
 }
 
 
+async function createJiraTicket(ticketDetails) {
+    const jiraUrl = 'https://capillarytech.atlassian.net/rest/api/3/issue'; // Replace with your Jira domain
+    const username = 'gourav.hanumante@capillarytech.com'; // Replace with your Jira email
+    const apiToken = process.env.JIRA_API_KEY; // Replace with your Jira API token
+
+    // Prepare the authorization header using basic auth
+    const auth = {
+        auth: {
+            username: username,
+            password: apiToken,
+        },
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    };
+    console.log('Priority value being sent:', ticketDetails.priority);
+    // Prepare the payload with the ticket details
+    
+    const payload = {
+        fields: {
+            project: {
+                key: ticketDetails.project,
+            },
+            summary: ticketDetails.summary,
+            description: {
+                type: "doc",
+                version: 1,
+                content: [
+                    {
+                        type: "paragraph",
+                        content: [
+                            {
+                                type: "text",
+                                text: ticketDetails.description ?? '',
+                            
+                            }
+                        ]
+                    }
+                ]
+            },
+            priority: {
+                id: getPriorityId(ticketDetails.priority)
+            },
+            issuetype: {
+                name: ticketDetails.issuetype,
+            },
+            labels: ticketDetails.labels,
+            customfield_11997: [
+                {
+                    "value": ticketDetails.customfield_11997
+                }
+            ],
+            components: [
+                {
+                    "name": ticketDetails.components
+                }
+            ],
+            customfield_11800: [
+                {
+                    "value" : ticketDetails.customfield_11800
+                }
+            ],
+        },
+    };
+
+    console.log('payload-------', JSON.stringify(payload));
+
+    // Make the request to create the Jira ticket
+    const response =  await axios.post(jiraUrl, payload, auth)
+    return response;
+    console.log("response", response);
+        
+    
+}
+
+
+function getPriorityId(priorityName) {
+    const priorities = {
+        "Highest": "1",
+        "High": "2", 
+        "Medium": "3",
+        "Low": "4",
+        "Lowest": "5"
+    };
+    return priorities[priorityName] || "3"; // Default to Medium
+}
+
+
+
 async function checkMissingFields(userInputJson) {
     const missingFields = [];
 
@@ -304,18 +440,16 @@ async function checkMissingFields(userInputJson) {
     }
 
     const requiredFields = await fetchRequiredFields(userInputJson.project, userInputJson.issuetype.capitalizeFirstLetter());
-
-
-    const details = await fetchSpecificCustomFields("");
+    const missingFieldData = await fetchSpecificCustomFields(requiredFields);
 
     console.log("requiredFieldsssss ", requiredFields)
   
     requiredFields.forEach(field => {
       if (!userInputJson[field]) {
-        missingFields.push(field);
+        missingFields.push(missingFieldData[field].name);
       }
     });
-  
+
     return missingFields;
 }
 
